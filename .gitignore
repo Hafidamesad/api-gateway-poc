@@ -1,0 +1,28 @@
+# Build artefacts .NET
+bin/
+obj/
+*.user
+
+# Bases de données SQLite locales (données factices, pas de valeur à versionner)
+*.db
+*.db-shm
+*.db-wal
+
+# Fichiers IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+
+# Secrets / config locale
+appsettings.Development.json
+appsettings.*.local.json
+*.pfx
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
