@@ -1,0 +1,6 @@
+@RhPaie.Api_HostAddress = http://localhost:5058
+
+GET {{RhPaie.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
