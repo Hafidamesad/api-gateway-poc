@@ -1,0 +1,92 @@
+﻿services:
+  etudiants:
+    build:
+      context: ./src/Etudiants.Api
+    container_name: etudiants-api
+    ports:
+      - "5101:8080"
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - ASPNETCORE_ENVIRONMENT=Development
+    volumes:
+      - etudiants-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  transport:
+    build:
+      context: ./src/Transport.Api
+    container_name: transport-api
+    ports:
+      - "5102:8080"
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - ASPNETCORE_ENVIRONMENT=Development
+    volumes:
+      - transport-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  academique:
+    build:
+      context: ./src/Academique.Api
+    container_name: academique-api
+    ports:
+      - "5103:8080"
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - ASPNETCORE_ENVIRONMENT=Development
+    volumes:
+      - academique-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  finance:
+    build:
+      context: ./src/Finance.Api
+    container_name: finance-api
+    ports:
+      - "5104:8080"
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - ASPNETCORE_ENVIRONMENT=Development
+    volumes:
+      - finance-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  rhpaie:
+    build:
+      context: ./src/RhPaie.Api
+    container_name: rhpaie-api
+    ports:
+      - "5105:8080"
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - ASPNETCORE_ENVIRONMENT=Development
+    volumes:
+      - rhpaie-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  etudiants-data:
+  transport-data:
+  academique-data:
+  finance-data:
+  rhpaie-data:
