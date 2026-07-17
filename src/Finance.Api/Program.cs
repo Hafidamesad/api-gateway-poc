@@ -4,7 +4,6 @@ using Finance.Api.Data;
 using Finance.Api.Models;
 
 var builder = WebApplication.CreateBuilder(args);
-
 // --- Services ---
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
