@@ -45,7 +45,7 @@ using (var scope = app.Services.CreateScope())
 // SoapCore ne permet pas d'inspecter les headers custom depuis l'implémentation du service,
 // donc la vérification de présence des headers HMAC se fait ici, avant que la requête
 // n'atteigne le endpoint SOAP. Même contrat placeholder que Finance (à valider).
-app.Use(async (context, next) =>
+app.Use(async (HttpContext context, Func<Task> next) =>
 {
     if (context.Request.Path.StartsWithSegments("/RhPaieService.asmx"))
     {
