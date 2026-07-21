@@ -1,0 +1,50 @@
+HELP.md
+target/
+.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+
+### Environnement / config sensible ###
+.env
+application-local.yml
+application-local.properties
+application-dev.yml
+*.log
+
+### OS ###
+.DS_Store
+Thumbs.db
+
+### Docker (si tu utilises des volumes/données locales) ###
+docker-data/
+
+### Maven (au cas où le wrapper n'attrape pas tout) ###
+.mvn/wrapper/maven-wrapper.properties

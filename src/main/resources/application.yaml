@@ -1,0 +1,113 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: gateway-spring
+  cloud:
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            connect-timeout: 2000
+            response-timeout: 5s
+          routes:
+            # --- Healthchecks : à part, car ils vivent à la racine du
+            # backend (app.MapHealthChecks("/health")), PAS sous /api/.
+            # Placés AVANT les routes génériques : Spring Cloud Gateway évalue
+            # les routes dans l'ordre de déclaration, la première qui matche gagne.
+            - id: etudiants-health
+              uri: http://localhost:5101
+              predicates:
+                - Path=/api/etudiants/health
+              filters:
+                - SetPath=/health
+
+            - id: transport-health
+              uri: http://localhost:5102
+              predicates:
+                - Path=/api/transport/health
+              filters:
+                - SetPath=/health
+
+            - id: academique-health
+              uri: http://localhost:5103
+              predicates:
+                - Path=/api/academique/health
+              filters:
+                - SetPath=/health
+
+            - id: finance-health
+              uri: http://localhost:5104
+              predicates:
+                - Path=/api/finance/health
+              filters:
+                - SetPath=/health
+
+            # Pas de route dédiée pour rhpaie-health : la route générale
+            # "rhpaie" plus bas utilise StripPrefix (pas RewritePath), qui ne
+            # réinjecte PAS /api. /api/rhpaie/health est donc déjà forwardé
+            # correctement vers /health sans règle supplémentaire.
+
+            # --- Backends REST : exposent déjà leurs endpoints métier sous /api/...
+            # On retire uniquement le segment de module (ex: "etudiants"),
+            # et on RÉ-INJECTE /api pour matcher ce que le contrôleur .NET attend.
+            # Ex: GET /api/etudiants/42 -> GET http://localhost:5101/api/etudiants/42
+            - id: etudiants
+              uri: http://localhost:5101
+              predicates:
+                - Path=/api/etudiants/**
+              filters:
+                - RewritePath=/api/etudiants/(?<segment>.*), /api/${segment}
+
+            - id: transport
+              uri: http://localhost:5102
+              predicates:
+                - Path=/api/transport/**
+              filters:
+                - RewritePath=/api/transport/(?<segment>.*), /api/${segment}
+
+            - id: academique
+              uri: http://localhost:5103
+              predicates:
+                - Path=/api/academique/**
+              filters:
+                - RewritePath=/api/academique/(?<segment>.*), /api/${segment}
+
+            - id: finance
+              uri: http://localhost:5104
+              predicates:
+                - Path=/api/finance/**
+              filters:
+                - RewritePath=/api/finance/(?<segment>.*), /api/${segment}
+
+            # RH/Paie (SOAP via SoapCore) : endpoint confirmé à la racine
+            # (/RhPaieService.asmx, /health) -> pas de RewritePath, on
+            # enlève juste /api/rhpaie en entier.
+            - id: rhpaie
+              uri: http://localhost:5105
+              predicates:
+                - Path=/api/rhpaie/**
+              filters:
+                - StripPrefix=2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,gateway
+  endpoint:
+    gateway:
+      # access: read-only (pas "unrestricted") -- mitigation officielle Spring
+      # pour CVE-2025-41243 (CVSS 10.0) / CVE-2025-41253 : injection SpEL via
+      # l'actuator gateway exposé sans restriction sur Server WebFlux.
+      # "unrestricted" autoriserait la modification de routes à chaud et
+      # l'accès à des données sensibles -- inutile pour ce prototype.
+      # Avant tout partage au-delà de votre poste : isoler /actuator sur un
+      # port de management séparé (management.server.port) non exposé,
+      # ou retirer "gateway" de la liste d'exposition ci-dessus.
+      access: read-only
+
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO
