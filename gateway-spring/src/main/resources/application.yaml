@@ -57,29 +57,23 @@ spring:
               uri: http://localhost:5101
               predicates:
                 - Path=/api/etudiants/**
-              filters:
-                - RewritePath=/api/etudiants/(?<segment>.*), /api/${segment}
+
 
             - id: transport
               uri: http://localhost:5102
               predicates:
                 - Path=/api/transport/**
-              filters:
-                - RewritePath=/api/transport/(?<segment>.*), /api/${segment}
 
             - id: academique
               uri: http://localhost:5103
               predicates:
                 - Path=/api/academique/**
-              filters:
-                - RewritePath=/api/academique/(?<segment>.*), /api/${segment}
 
             - id: finance
               uri: http://localhost:5104
               predicates:
                 - Path=/api/finance/**
-              filters:
-                - RewritePath=/api/finance/(?<segment>.*), /api/${segment}
+
 
             # RH/Paie (SOAP via SoapCore) : endpoint confirmé à la racine
             # (/RhPaieService.asmx, /health) -> pas de RewritePath, on
