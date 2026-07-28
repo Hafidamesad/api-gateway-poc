@@ -1,0 +1,104 @@
+server:
+  port: 8443
+  ssl:
+    enabled: true
+    key-store: classpath:certs/gateway.p12
+    key-store-password: changeit
+    key-store-type: PKCS12
+    trust-store: classpath:certs/truststore.p12
+    trust-store-password: changeit
+    trust-store-type: PKCS12
+    client-auth: need
+
+spring:
+  application:
+    name: gateway-spring
+  cloud:
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            connect-timeout: 2000
+            response-timeout: 5s
+          routes:
+            - id: etudiants-health
+              uri: https://localhost:5101
+              predicates:
+                - Path=/api/etudiants/health
+              filters:
+                - SetPath=/health
+
+            - id: transport-health
+              uri: https://localhost:5102
+              predicates:
+                - Path=/api/transport/health
+              filters:
+                - SetPath=/health
+
+            - id: academique-health
+              uri: https://localhost:5103
+              predicates:
+                - Path=/api/academique/health
+              filters:
+                - SetPath=/health
+
+            - id: finance-health
+              uri: https://localhost:5104
+              predicates:
+                - Path=/api/finance/health
+              filters:
+                - SetPath=/health
+
+            - id: etudiants
+              uri: https://localhost:5101
+              predicates:
+                - Path=/api/etudiants/**
+              filters:
+                - RewritePath=/api/etudiants/(?<segment>.*), /api/${segment}
+
+            - id: transport
+              uri: https://localhost:5102
+              predicates:
+                - Path=/api/transport/**
+              filters:
+                - RewritePath=/api/transport/(?<segment>.*), /api/${segment}
+
+            - id: academique
+              uri: https://localhost:5103
+              predicates:
+                - Path=/api/academique/**
+              filters:
+                - RewritePath=/api/academique/(?<segment>.*), /api/${segment}
+
+            - id: finance
+              uri: https://localhost:5104
+              predicates:
+                - Path=/api/finance/**
+              filters:
+                - RewritePath=/api/finance/(?<segment>.*), /api/${segment}
+
+            - id: rhpaie
+              uri: https://localhost:5105
+              predicates:
+                - Path=/api/rhpaie/**
+              filters:
+                - StripPrefix=2
+gateway:
+  ssl:
+    key-store: classpath:certs/gateway.p12
+    key-store-password: changeit
+    trust-store: classpath:certs/truststore.p12
+    trust-store-password: changeit
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,gateway
+  endpoint:
+    gateway:
+      access: read-only
+
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO

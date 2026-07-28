@@ -4,8 +4,40 @@ using Bogus;
 using RhPaie.Api.Data;
 using RhPaie.Api.Models;
 using RhPaie.Api.Services;
+using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.ConfigureHttpsDefaults(https =>
+    {
+        https.ServerCertificate = new X509Certificate2("certs/service.p12", "changeit");
+        https.ClientCertificateMode = ClientCertificateMode.RequireCertificate;
+        https.ClientCertificateValidation = (clientCert, chain, sslPolicyErrors) =>
+        {
+            var caCert = new X509Certificate2("certs/ca.crt");
+            using var validationChain = new X509Chain();
+            validationChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+            validationChain.ChainPolicy.CustomTrustStore.Add(caCert);
+            validationChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+            bool isValid = validationChain.Build(clientCert);
+            if (!isValid)
+            {
+                foreach (var status in validationChain.ChainStatus)
+                {
+                    Console.WriteLine($"Chain error: {status.StatusInformation}");
+                }
+            }
+            return isValid;
+        };
+    });
+    options.ListenAnyIP(5105, listenOptions =>
+    {
+        listenOptions.UseHttps();
+    });
+});
 
 // --- Services ---
 builder.Services.AddSoapCore();
