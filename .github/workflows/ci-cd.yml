@@ -50,13 +50,20 @@ jobs:
           fi
 
       # Génère le contrat OpenAPI au build, plutôt que de l'exposer via un endpoint public à l'exécution
+      - name: Déterminer le nom en minuscule (pour le nom de fichier du contrat)
+        id: modname_lower
+        run: |
+          M="${{ matrix.module }}"
+          echo "lowercase=$(echo "$M" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Générer le contrat OpenAPI (modules REST uniquement)
         if: matrix.module != 'RhPaie'
         run: |
           dotnet tool install --global Swashbuckle.AspNetCore.Cli --version 6.* || true
           export PATH="$PATH:$HOME/.dotnet/tools"
           dotnet build src/${{ matrix.module }}.Api/${{ matrix.module }}.Api.csproj -c Release -o ./build-out/${{ matrix.module }}
-          swagger tofile --output ./contracts/${{ matrix.module,,}}-openapi.json \
+          mkdir -p ./contracts
+          swagger tofile --output ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json \
             ./build-out/${{ matrix.module }}/${{ matrix.module }}.Api.dll v1
 
       - name: Uploader le contrat OpenAPI comme artefact
@@ -64,7 +71,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: openapi-${{ matrix.module }}
-          path: ./contracts/${{ matrix.module,,}}-openapi.json
+          path: ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json
 
   # =========================================================
   # 2. BUILD IMAGE DOCKER + SCAN DE VULNÉRABILITÉS + PUSH ACR
