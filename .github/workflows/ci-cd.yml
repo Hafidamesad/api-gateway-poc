@@ -1,0 +1,162 @@
+name: CI/CD - EDU Backends & Gateway
+
+on:
+  push:
+    branches: [feature/ci-cd-pipeline, develop, main]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch: {}
+
+env:
+  ACR_NAME: hafidaeduacr-dxd6dfevhwh4evhr
+  RESOURCE_GROUP: rg-edu-gateway-dev
+  CONTAINER_APPS_ENV: env-edu-gateway
+  APIM_NAME: apim-edu-gateway
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [Etudiants, Transport, Academique, Finance, RhPaie]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore
+        run: dotnet restore src/${{ matrix.module }}.Api/${{ matrix.module }}.Api.csproj
+      - name: Build
+        run: dotnet build src/${{ matrix.module }}.Api/${{ matrix.module }}.Api.csproj --configuration Release --no-restore
+      - name: Test (si des tests existent)
+        run: |
+          if [ -d "tests/${{ matrix.module }}.Api.Tests" ]; then
+            dotnet test tests/${{ matrix.module }}.Api.Tests --configuration Release
+          else
+            echo "Pas de projet de test pour ${{ matrix.module }} - étape ignorée"
+          fi
+      - name: Générer le contrat OpenAPI (modules REST uniquement)
+        if: matrix.module != 'RhPaie'
+        run: |
+          dotnet tool install --global Swashbuckle.AspNetCore.Cli --version 6.* || true
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet build src/${{ matrix.module }}.Api/${{ matrix.module }}.Api.csproj -c Release -o ./build-out/${{ matrix.module }}
+          swagger tofile --output ./contracts/${{ matrix.module,,}}-openapi.json \
+            ./build-out/${{ matrix.module }}/${{ matrix.module }}.Api.dll v1
+      - name: Uploader le contrat OpenAPI comme artefact
+        if: matrix.module != 'RhPaie'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-${{ matrix.module }}
+          path: ./contracts/${{ matrix.module,,}}-openapi.json
+
+  build-push-images:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [etudiants, transport, academique, finance, rhpaie]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Connexion Azure (OIDC, sans secret statique)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Connexion à Azure Container Registry
+        run: az acr login --name ${{ env.ACR_NAME }}
+      - name: Déterminer le nom du dossier source (majuscule initiale)
+        id: modname
+        run: |
+          M="${{ matrix.module }}"
+          echo "capitalized=$(echo "${M^}")" >> $GITHUB_OUTPUT
+      - name: Build image
+        run: |
+          docker build \
+            -t ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:${{ github.sha }} \
+            -t ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:latest \
+            ./src/${{ steps.modname.outputs.capitalized }}.Api
+      - name: Scan de vulnérabilités (Trivy)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:${{ github.sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: 1
+        continue-on-error: true
+      - name: Push image (tag SHA + latest)
+        run: |
+          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:${{ github.sha }}
+          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:latest
+
+  deploy-container-apps:
+    needs: build-push-images
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [etudiants, transport, academique, finance, rhpaie]
+    steps:
+      - name: Connexion Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Mettre à jour le Container App avec la nouvelle image
+        run: |
+          az containerapp update \
+            --name ${{ matrix.module }}-api \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --image ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:${{ github.sha }}
+      - name: Vérifier le health check post-déploiement
+        run: |
+          FQDN=$(az containerapp show --name ${{ matrix.module }}-api \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          echo "Attente du démarrage (cold start possible, scale-to-zero)..."
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$FQDN/health" || echo "000")
+            if [ "$STATUS" == "200" ]; then
+              echo "✅ $FQDN/health répond 200"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "❌ Health check échoué après plusieurs tentatives"
+          exit 1
+
+  update-apim:
+    needs: deploy-container-apps
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Connexion Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Télécharger les contrats OpenAPI générés au build
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openapi-*
+          path: ./contracts
+          merge-multiple: true
+      - name: Importer/mettre à jour chaque API REST dans APIM
+        run: |
+          declare -A SUFFIX=( [etudiants]=etudiants [transport]=transport [academique]=academique [finance]=finance )
+          for mod in etudiants transport academique finance; do
+            az apim api import \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --service-name ${{ env.APIM_NAME }} \
+              --api-id ${mod}-api \
+              --path ${SUFFIX[$mod]} \
+              --specification-format OpenApi \
+              --specification-path ./contracts/${mod}-openapi.json
+          done
