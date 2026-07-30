@@ -56,15 +56,26 @@ jobs:
           M="${{ matrix.module }}"
           echo "lowercase=$(echo "$M" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
-      - name: Générer le contrat OpenAPI (modules REST uniquement)
+      # Génération design-time : le contrat OpenAPI est extrait par analyse statique
+      # du build, sans jamais exécuter l'application (pas de réseau, pas de DB,
+      # pas de dépendance à un démarrage réussi). Contrairement à une génération
+      # runtime, un problème d'infrastructure au démarrage ne peut plus faire
+      # échouer cette étape.
+      - name: Générer le contrat OpenAPI au build (design-time, sans exécution)
         if: matrix.module != 'RhPaie'
         run: |
-          dotnet tool install --global Swashbuckle.AspNetCore.Cli --version 6.* || true
-          export PATH="$PATH:$HOME/.dotnet/tools"
-          dotnet build src/${{ matrix.module }}.Api/${{ matrix.module }}.Api.csproj -c Release -o ./build-out/${{ matrix.module }}
           mkdir -p ./contracts
-          swagger tofile --output ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json \
-            ./build-out/${{ matrix.module }}/${{ matrix.module }}.Api.dll v1
+          dotnet build src/${{ matrix.module }}.Api/${{ matrix.module }}.Api.csproj --configuration Release
+
+          GENERATED=$(find ./contracts -iname "*${{ matrix.module }}*.json" | head -n 1)
+          if [ -z "$GENERATED" ]; then
+            echo "❌ Aucun contrat OpenAPI trouvé dans ./contracts pour ${{ matrix.module }}"
+            ls -la ./contracts || true
+            exit 1
+          fi
+
+          mv "$GENERATED" ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json
+          echo "✅ Contrat généré : ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json"
 
       - name: Uploader le contrat OpenAPI comme artefact
         if: matrix.module != 'RhPaie'
