@@ -1,4 +1,3 @@
-name: CI/CD - EDU Backends & Gateway
 
 on:
   push:
@@ -8,7 +7,8 @@ on:
   workflow_dispatch: {}   # permet de relancer manuellement depuis l'onglet Actions
 
 env:
-  ACR_NAME: hafidaeduacr-dxd6dfevhwh4evhr
+  ACR_NAME: hafidaeduacr                              # nom de ressource Azure (alphanumérique uniquement, sans tiret) - à AJUSTER avec la vraie valeur retournée par `az acr list`
+  ACR_LOGIN_SERVER: hafidaeduacr-dxd6dfevhwh4evhr.azurecr.io   # FQDN complet utilisé par Docker et les Container Apps
   RESOURCE_GROUP: rg-edu-gateway-dev
   CONTAINER_APPS_ENV: env-edu-gateway
   APIM_NAME: apim-edu-gateway
@@ -137,15 +137,19 @@ jobs:
       - name: Build image
         run: |
           docker build \
-            -t ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:${{ github.sha }} \
-            -t ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:latest \
+            -t ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:${{ github.sha }} \
+            -t ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:latest \
             ./src/${{ steps.modname.outputs.capitalized }}.Api
 
       # Scan de vulnérabilités avant tout push - bloque le pipeline sur une faille critique/haute
       - name: Scan de vulnérabilités (Trivy)
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
+        # ⚠️ Épinglé explicitement sur 0.35.0 : seul tag confirmé non compromis suite à
+        # l'attaque de chaîne d'approvisionnement de mars 2026 sur aquasecurity/trivy-action
+        # (76 des 77 tags ont été détournés pour voler des secrets CI/CD). Ne PAS changer
+        # cette version sans vérifier au préalable l'état de sécurité du tag visé.
+        uses: aquasecurity/trivy-action@0.35.0
         with:
-          image-ref: ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:${{ github.sha }}
+          image-ref: ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:${{ github.sha }}
           format: table
           severity: CRITICAL,HIGH
           exit-code: 1
@@ -153,8 +157,8 @@ jobs:
 
       - name: Push image (tag SHA + latest)
         run: |
-          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:${{ github.sha }}
-          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:latest
+          docker push ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:${{ github.sha }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:latest
 
   # =========================================================
   # 3. DÉPLOIEMENT VERS AZURE CONTAINER APPS
@@ -178,7 +182,7 @@ jobs:
           az containerapp update \
             --name ${{ matrix.module }}-api \
             --resource-group ${{ env.RESOURCE_GROUP }} \
-            --image ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:${{ github.sha }}
+            --image ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:${{ github.sha }}
 
       - name: Vérifier le health check post-déploiement
         run: |
