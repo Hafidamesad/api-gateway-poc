@@ -128,11 +128,18 @@ jobs:
       - name: Connexion à Azure Container Registry
         run: az acr login --name ${{ env.ACR_NAME }}
 
-      - name: Déterminer le nom du dossier source (majuscule initiale)
+      - name: Déterminer le nom du dossier source exact
         id: modname
         run: |
-          M="${{ matrix.module }}"
-          echo "capitalized=$(echo "${M^}")" >> $GITHUB_OUTPUT
+          case "${{ matrix.module }}" in
+            etudiants)  FOLDER="Etudiants" ;;
+            transport)  FOLDER="Transport" ;;
+            academique) FOLDER="Academique" ;;
+            finance)    FOLDER="Finance" ;;
+            rhpaie)     FOLDER="RhPaie" ;;   # casse spéciale : P majuscule au milieu
+            *) echo "Module inconnu: ${{ matrix.module }}"; exit 1 ;;
+          esac
+          echo "capitalized=$FOLDER" >> $GITHUB_OUTPUT
 
       - name: Build image
         run: |
