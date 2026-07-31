@@ -56,26 +56,50 @@ jobs:
           M="${{ matrix.module }}"
           echo "lowercase=$(echo "$M" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
-      # Génération design-time : le contrat OpenAPI est extrait par analyse statique
-      # du build, sans jamais exécuter l'application (pas de réseau, pas de DB,
-      # pas de dépendance à un démarrage réussi). Contrairement à une génération
-      # runtime, un problème d'infrastructure au démarrage ne peut plus faire
-      # échouer cette étape.
-      - name: Générer le contrat OpenAPI au build (design-time, sans exécution)
+      # Récupère le contrat OpenAPI en démarrant temporairement l'app compilée,
+      # plutôt que via une génération "design-time" qui nécessiterait un package
+      # MSBuild dédié (Microsoft.Extensions.ApiDescription.Server) non configuré ici.
+      - name: Générer le contrat OpenAPI (modules REST uniquement)
         if: matrix.module != 'RhPaie'
+        env:
+          ASPNETCORE_URLS: http://localhost:5000
+          ASPNETCORE_ENVIRONMENT: Production
+          SWAGGER_ACCESS_KEY: ci-temp-key
+          ConnectionStrings__DefaultConnection: Data Source=/tmp/${{ steps.modname_lower.outputs.lowercase }}-ci.db
         run: |
           mkdir -p ./contracts
-          dotnet build src/${{ matrix.module }}.Api/${{ matrix.module }}.Api.csproj --configuration Release
+          dotnet build src/${{ matrix.module }}.Api/${{ matrix.module }}.Api.csproj -c Release -o ./build-out/${{ matrix.module }}
 
-          GENERATED=$(find ./contracts -iname "*${{ matrix.module }}*.json" | head -n 1)
-          if [ -z "$GENERATED" ]; then
-            echo "❌ Aucun contrat OpenAPI trouvé dans ./contracts pour ${{ matrix.module }}"
-            ls -la ./contracts || true
+          dotnet ./build-out/${{ matrix.module }}/${{ matrix.module }}.Api.dll &
+          APP_PID=$!
+
+          echo "Attente du démarrage de l'application..."
+          READY=false
+          for i in {1..15}; do
+            if curl -s -o /dev/null http://localhost:5000/health; then
+              READY=true
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$READY" != "true" ]; then
+            echo "❌ L'application n'a pas démarré à temps"
+            kill $APP_PID 2>/dev/null || true
             exit 1
           fi
 
-          mv "$GENERATED" ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json
-          echo "✅ Contrat généré : ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json"
+          curl -s -H "X-Swagger-Key: ci-temp-key" \
+            http://localhost:5000/swagger/v1/swagger.json \
+            -o ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json
+
+          kill $APP_PID 2>/dev/null || true
+
+          if [ ! -s ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json ]; then
+            echo "❌ Le contrat OpenAPI généré est vide ou introuvable"
+            exit 1
+          fi
+          echo "✅ Contrat OpenAPI généré avec succès"
 
       - name: Uploader le contrat OpenAPI comme artefact
         if: matrix.module != 'RhPaie'
