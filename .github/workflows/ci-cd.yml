@@ -63,8 +63,7 @@ jobs:
         if: matrix.module != 'RhPaie'
         env:
           ASPNETCORE_URLS: http://localhost:5000
-          ASPNETCORE_ENVIRONMENT: Production
-          SWAGGER_ACCESS_KEY: ci-temp-key
+          ASPNETCORE_ENVIRONMENT: Development   # actif uniquement dans ce contexte CI éphémère (localhost du runner) - jamais exposé publiquement
           ConnectionStrings__DefaultConnection: Data Source=/tmp/${{ steps.modname_lower.outputs.lowercase }}-ci.db
         run: |
           mkdir -p ./contracts
@@ -89,8 +88,7 @@ jobs:
             exit 1
           fi
 
-          curl -s -H "X-Swagger-Key: ci-temp-key" \
-            http://localhost:5000/swagger/v1/swagger.json \
+          curl -s http://localhost:5000/swagger/v1/swagger.json \
             -o ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json
 
           kill $APP_PID 2>/dev/null || true
