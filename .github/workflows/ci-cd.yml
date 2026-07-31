@@ -143,7 +143,7 @@ jobs:
 
       # Scan de vulnérabilités avant tout push - bloque le pipeline sur une faille critique/haute
       - name: Scan de vulnérabilités (Trivy)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
         with:
           image-ref: ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.module }}:${{ github.sha }}
           format: table
