@@ -1,0 +1,240 @@
+
+on:
+  push:
+    branches: [feature/ci-cd-pipeline, main]
+    workflow_dispatch: {}   # permet de relancer manuellement depuis l'onglet Actions
+
+env:
+  ACR_NAME: hafidaeduacr                              # nom de ressource Azure (alphanumérique uniquement, sans tiret) - à AJUSTER avec la vraie valeur retournée par `az acr list`
+  ACR_LOGIN_SERVER: hafidaeduacr-dxd6dfevhwh4evhr.azurecr.io   # FQDN complet utilisé par Docker et les Container Apps
+  RESOURCE_GROUP: rg-edu-gateway-dev
+  CONTAINER_APPS_ENV: env-edu-gateway
+  APIM_NAME: apim-edu-gateway
+
+permissions:
+  id-token: write   # requis pour l'authentification OIDC
+  contents: read
+
+jobs:
+
+  # =========================================================
+  # 1. BUILD + TEST + GÉNÉRATION DU CONTRAT OPENAPI (par module)
+  # =========================================================
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [Etudiants, Transport, Academique, Finance, RhPaie]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore src/${{ matrix.module }}.Api/${{ matrix.module }}.Api.csproj
+
+      - name: Build
+        run: dotnet build src/${{ matrix.module }}.Api/${{ matrix.module }}.Api.csproj --configuration Release --no-restore
+
+      - name: Test (si des tests existent)
+        run: |
+          if [ -d "tests/${{ matrix.module }}.Api.Tests" ]; then
+            dotnet test tests/${{ matrix.module }}.Api.Tests --configuration Release
+          else
+            echo "Pas de projet de test pour ${{ matrix.module }} - étape ignorée"
+          fi
+
+      # Génère le contrat OpenAPI au build, plutôt que de l'exposer via un endpoint public à l'exécution
+      - name: Déterminer le nom en minuscule (pour le nom de fichier du contrat)
+        id: modname_lower
+        run: |
+          M="${{ matrix.module }}"
+          echo "lowercase=$(echo "$M" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      # Récupère le contrat OpenAPI en démarrant temporairement l'app compilée,
+      # plutôt que via une génération "design-time" qui nécessiterait un package
+      # MSBuild dédié (Microsoft.Extensions.ApiDescription.Server) non configuré ici.
+      - name: Générer le contrat OpenAPI (modules REST uniquement)
+        if: matrix.module != 'RhPaie'
+        env:
+          ASPNETCORE_URLS: http://localhost:5000
+          ASPNETCORE_ENVIRONMENT: Development   # actif uniquement dans ce contexte CI éphémère (localhost du runner) - jamais exposé publiquement
+          ConnectionStrings__DefaultConnection: Data Source=/tmp/${{ steps.modname_lower.outputs.lowercase }}-ci.db
+        run: |
+          mkdir -p ./contracts
+          dotnet build src/${{ matrix.module }}.Api/${{ matrix.module }}.Api.csproj -c Release -o ./build-out/${{ matrix.module }}
+
+          dotnet ./build-out/${{ matrix.module }}/${{ matrix.module }}.Api.dll &
+          APP_PID=$!
+
+          echo "Attente du démarrage de l'application..."
+          READY=false
+          for i in {1..15}; do
+            if curl -s -o /dev/null http://localhost:5000/health; then
+              READY=true
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$READY" != "true" ]; then
+            echo "❌ L'application n'a pas démarré à temps"
+            kill $APP_PID 2>/dev/null || true
+            exit 1
+          fi
+
+          curl -s http://localhost:5000/swagger/v1/swagger.json \
+            -o ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json
+
+          kill $APP_PID 2>/dev/null || true
+
+          if [ ! -s ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json ]; then
+            echo "❌ Le contrat OpenAPI généré est vide ou introuvable"
+            exit 1
+          fi
+          echo "✅ Contrat OpenAPI généré avec succès"
+
+      - name: Uploader le contrat OpenAPI comme artefact
+        if: matrix.module != 'RhPaie'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-${{ matrix.module }}
+          path: ./contracts/${{ steps.modname_lower.outputs.lowercase }}-openapi.json
+
+  # =========================================================
+  # 2. BUILD IMAGE DOCKER + SCAN DE VULNÉRABILITÉS + PUSH ACR
+  # =========================================================
+  build-push-images:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [etudiants, transport, academique, finance, rhpaie]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Connexion Azure (OIDC, sans secret statique)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Connexion à Azure Container Registry
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Déterminer le nom du dossier source exact
+        id: modname
+        run: |
+          case "${{ matrix.module }}" in
+            etudiants)  FOLDER="Etudiants" ;;
+            transport)  FOLDER="Transport" ;;
+            academique) FOLDER="Academique" ;;
+            finance)    FOLDER="Finance" ;;
+            rhpaie)     FOLDER="RhPaie" ;;   # casse spéciale : P majuscule au milieu
+            *) echo "Module inconnu: ${{ matrix.module }}"; exit 1 ;;
+          esac
+          echo "capitalized=$FOLDER" >> $GITHUB_OUTPUT
+
+      - name: Build image
+        run: |
+          docker build \
+            -t ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:${{ github.sha }} \
+            -t ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:latest \
+            ./src/${{ steps.modname.outputs.capitalized }}.Api
+
+      # Scan de vulnérabilités avant tout push - bloque le pipeline sur une faille critique/haute
+      - name: Scan de vulnérabilités (Trivy)
+        # ⚠️ Épinglé explicitement sur 0.35.0 : seul tag confirmé non compromis suite à
+        # l'attaque de chaîne d'approvisionnement de mars 2026 sur aquasecurity/trivy-action
+        # (76 des 77 tags ont été détournés pour voler des secrets CI/CD). Ne PAS changer
+        # cette version sans vérifier au préalable l'état de sécurité du tag visé.
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:${{ github.sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: 1
+      - name: Push image (tag SHA + latest)
+        run: |
+          docker push ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:${{ github.sha }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:latest
+
+  # =========================================================
+  # 3. DÉPLOIEMENT VERS AZURE CONTAINER APPS
+  # =========================================================
+  deploy-container-apps:
+    needs: build-push-images
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [etudiants, transport, academique, finance, rhpaie]
+    steps:
+      - name: Connexion Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Mettre à jour le Container App avec la nouvelle image (tag SHA = traçabilité)
+        run: |
+          az containerapp update \
+            --name ${{ matrix.module }}-api \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --image ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:${{ github.sha }}
+
+      - name: Vérifier le health check post-déploiement
+        run: |
+          FQDN=$(az containerapp show --name ${{ matrix.module }}-api \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          echo "Attente du démarrage (cold start possible, scale-to-zero)..."
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$FQDN/health" || echo "000")
+            if [ "$STATUS" == "200" ]; then
+              echo "✅ $FQDN/health répond 200"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "❌ Health check échoué après plusieurs tentatives"
+          exit 1
+
+  # =========================================================
+  # 4. IMPORT / MISE À JOUR DES CONTRATS DANS APIM
+  # =========================================================
+  update-apim:
+    needs: deploy-container-apps
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'   # n'applique les changements APIM qu'en branche stable
+    steps:
+      - name: Connexion Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Télécharger les contrats OpenAPI générés au build
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openapi-*
+          path: ./contracts
+          merge-multiple: true
+
+      - name: Importer/mettre à jour chaque API REST dans APIM
+        run: |
+          declare -A SUFFIX=( [etudiants]=etudiants [transport]=transport [academique]=academique [finance]=finance )
+          for mod in etudiants transport academique finance; do
+            az apim api import \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --service-name ${{ env.APIM_NAME }} \
+              --api-id ${mod}-api \
+              --path ${SUFFIX[$mod]} \
+              --specification-format OpenApi \
+              --specification-path ./contracts/${mod}-openapi.json
+          done
