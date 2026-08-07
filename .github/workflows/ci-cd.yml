@@ -2,9 +2,7 @@
 on:
   push:
     branches: [feature/ci-cd-pipeline, main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch: {}   # permet de relancer manuellement depuis l'onglet Actions
+    workflow_dispatch: {}   # permet de relancer manuellement depuis l'onglet Actions
 
 env:
   ACR_NAME: hafidaeduacr                              # nom de ressource Azure (alphanumérique uniquement, sans tiret) - à AJUSTER avec la vraie valeur retournée par `az acr list`
