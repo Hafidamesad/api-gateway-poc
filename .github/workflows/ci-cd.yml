@@ -160,8 +160,6 @@ jobs:
           format: table
           severity: CRITICAL,HIGH
           exit-code: 1
-        continue-on-error: true   # passe à 'false' une fois le premier audit fait et les failles corrigées
-
       - name: Push image (tag SHA + latest)
         run: |
           docker push ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.module }}:${{ github.sha }}
