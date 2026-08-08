@@ -8,7 +8,7 @@ server:
     trust-store: classpath:certs/truststore.p12
     trust-store-password: changeit
     trust-store-type: PKCS12
-    client-auth: need
+    client-auth: none
 
 spring:
   application:
@@ -102,3 +102,11 @@ management:
 logging:
   level:
     org.springframework.cloud.gateway: INFO
+
+security:
+  hmac:
+    secret: ${HMAC_SECRET:CHANGE_ME_DEV_SECRET}
+
+  jwt:
+    secret: ${JWT_SECRET:CHANGE_ME_DEV_JWT_SECRET_MIN_32_CHARS}
+    expiration-ms: 3600000

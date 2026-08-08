@@ -2,8 +2,12 @@
 using Microsoft.EntityFrameworkCore;
 using Bogus;
 using Finance.Api.Data;
+using Finance.Api.Security;
 using Finance.Api.Models;
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -46,6 +50,24 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddHealthChecks();
 
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        var jwtSecret = Environment.GetEnvironmentVariable("JWT_SECRET")
+            ?? builder.Configuration["Security:Jwt:Secret"]
+            ?? "CHANGE_ME_DEV_JWT_SECRET_MIN_32_CHARS";
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret)),
+            ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha384 },
+            ValidateIssuer = false,
+            ValidateAudience = false,
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.Zero
+        };
+    });
+builder.Services.AddAuthorization();
 var app = builder.Build();
 
 // --- Migration automatique + seed au démarrage ---
@@ -86,9 +108,12 @@ if (app.Environment.IsDevelopment())
 }
 
 
+app.UseAuthentication();
 app.UseAuthorization();
 
-app.MapControllers();
+app.UseMiddleware<HmacVerificationMiddleware>();
+
+app.MapControllers().RequireAuthorization();
 app.MapHealthChecks("/health");
 
 app.Run();

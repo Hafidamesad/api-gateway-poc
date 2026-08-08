@@ -1,28 +1,16 @@
-# Build artefacts .NET
+# Secrets et certificats privés
+*.p12
+*.key
+*.pem
+*.jks
+security/pki/gateway/gateway.p12
+security/pki/root-ca/truststore.p12
+
+# Fichiers de build et bruits
+target/
 bin/
 obj/
-*.user
-
-# Bases de données SQLite locales (données factices, pas de valeur à versionner)
+*.db~
 *.db
-*.db-shm
-*.db-wal
-
-# Fichiers IDE
-.vs/
-.vscode/
-.idea/
-*.suo
-
-# Secrets / config locale
-appsettings.Development.json
-appsettings.*.local.json
-*.pfx
-*.key
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
+test.csr
+gateway-full.pem
