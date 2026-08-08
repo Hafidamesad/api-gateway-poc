@@ -60,7 +60,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         {
             ValidateIssuerSigningKey = true,
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret)),
-            ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha384 },
+            ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 },
             ValidateIssuer = false,
             ValidateAudience = false,
             ValidateLifetime = true,
