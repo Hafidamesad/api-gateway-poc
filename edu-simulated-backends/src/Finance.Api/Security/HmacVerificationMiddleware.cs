@@ -1,42 +1,33 @@
 using System.Security.Cryptography;
 using System.Text;
+using StackExchange.Redis;
 
 namespace Finance.Api.Security;
 
-/// <summary>
-/// Middleware de verification HMAC-SHA256.
-/// Recalcule la signature envoyee par le Gateway (X-Timestamp, X-Signature)
-/// et la compare a celle recue. Rejette avec 401 si absente ou invalide.
-///
-/// IMPORTANT: doit correspondre EXACTEMENT au format cote Gateway
-/// (HmacSignatureVerifier.java / HmacSigningFilter.java):
-///     canonicalString = METHOD + "\n" + PATH + "\n" + TIMESTAMP + "\n" + SHA256(BODY)
-///
-/// Le PATH utilise ici est celui recu par CE service (donc DEJA reecrit par le
-/// Gateway via SetPath/RewritePath/StripPrefix). Ne pas reconstruire le path
-/// original cote client -- le Gateway signe le path final, pas le path client.
-///
-/// Ordre d'enregistrement dans Program.cs: APRES app.UseHttpsRedirection() (si
-/// present, avec sa logique conditionnelle existante) mais AVANT
-/// app.MapControllers() / app.UseAuthorization(), pour bloquer les requetes
-/// non signees avant qu'elles n'atteignent la logique metier.
-/// </summary>
 public class HmacVerificationMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly ILogger<HmacVerificationMiddleware> _logger;
     private readonly string _hmacSecret;
+    private readonly IConnectionMultiplexer _redis;
 
     private const string TimestampHeader = "X-Timestamp";
+    private const string NonceHeader = "X-Nonce";
     private const string SignatureHeader = "X-Signature";
 
-    public HmacVerificationMiddleware(RequestDelegate next, ILogger<HmacVerificationMiddleware> logger, IConfiguration configuration)
+    private static readonly TimeSpan TimestampFreshnessWindow = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan NonceTtl = TimeSpan.FromMinutes(5); // match freshness window
+
+    public HmacVerificationMiddleware(
+        RequestDelegate next,
+        ILogger<HmacVerificationMiddleware> logger,
+        IConfiguration configuration,
+        IConnectionMultiplexer redis)
     {
         _next = next;
         _logger = logger;
+        _redis = redis;
 
-        // Meme secret partage que le Gateway (HMAC_SECRET), lu via variable d'environnement.
-        // IConfiguration lit automatiquement les variables d'environnement en ASP.NET Core.
         _hmacSecret = configuration["HMAC_SECRET"]
             ?? Environment.GetEnvironmentVariable("HMAC_SECRET")
             ?? "CHANGE_ME_DEV_SECRET";
@@ -44,26 +35,45 @@ public class HmacVerificationMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        // NOTE: /health n'est PAS exempte. Le Gateway signe deja les requetes
-        // de health check (confirme dans les logs), donc /health sert de banc
-        // de test naturel pour le protocole negatif/positif (comme pour mTLS):
-        // requete sans signature -> 401, requete avec mauvaise signature -> 401,
-        // requete correctement signee -> 200.
-
         if (!context.Request.Headers.TryGetValue(TimestampHeader, out var timestampValues) ||
+            !context.Request.Headers.TryGetValue(NonceHeader, out var nonceValues) ||
             !context.Request.Headers.TryGetValue(SignatureHeader, out var signatureValues))
         {
-            _logger.LogWarning("[HMAC] Requete rejetee: en-tetes X-Timestamp/X-Signature manquants pour {Method} {Path}",
+            _logger.LogWarning(
+                "[HMAC] Requete rejetee: en-tetes manquants pour {Method} {Path}",
                 context.Request.Method, context.Request.Path);
+
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await context.Response.WriteAsync("Signature HMAC manquante.");
+            await context.Response.WriteAsync("Signature HMAC ou nonce manquant.");
             return;
         }
 
         string timestamp = timestampValues.ToString();
+        string nonce = nonceValues.ToString();
         string providedSignature = signatureValues.ToString();
 
-        // Permet de relire le corps plus tard (dans le controleur)
+        // --- Timestamp freshness check ---
+        if (!long.TryParse(timestamp, out long timestampMs))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsync("Timestamp invalide.");
+            return;
+        }
+
+        var requestTime = DateTimeOffset.FromUnixTimeMilliseconds(timestampMs);
+        var age = DateTimeOffset.UtcNow - requestTime;
+
+        if (age > TimestampFreshnessWindow || age < -TimestampFreshnessWindow)
+        {
+            _logger.LogWarning(
+                "[HMAC] Requete rejetee: timestamp hors fenetre ({Age}) pour {Method} {Path}",
+                age, context.Request.Method, context.Request.Path);
+
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsync("Timestamp expire ou invalide.");
+            return;
+        }
+
         context.Request.EnableBuffering();
 
         byte[] bodyBytes;
@@ -72,33 +82,57 @@ public class HmacVerificationMiddleware
             await context.Request.Body.CopyToAsync(memoryStream);
             bodyBytes = memoryStream.ToArray();
         }
-        context.Request.Body.Position = 0; // reset pour le controleur
+        context.Request.Body.Position = 0;
 
         string method = context.Request.Method.ToUpperInvariant();
         string path = context.Request.Path.Value ?? "/";
 
-        string canonicalString = BuildCanonicalString(method, path, timestamp, bodyBytes);
+        string canonicalString = BuildCanonicalString(method, path, timestamp, nonce, bodyBytes);
         string expectedSignature = ComputeHmac(canonicalString, _hmacSecret);
 
         if (!IsValidSignature(providedSignature, expectedSignature))
         {
-            _logger.LogWarning("[HMAC] Signature invalide pour {Method} {Path} (timestamp={Timestamp})",
-                method, path, timestamp);
+            _logger.LogWarning(
+                "[HMAC] Signature invalide pour {Method} {Path} (timestamp={Timestamp}, nonce={Nonce})",
+                method, path, timestamp, nonce);
+
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
             await context.Response.WriteAsync("Signature HMAC invalide.");
             return;
         }
 
-        _logger.LogInformation("[HMAC] Signature valide pour {Method} {Path} (timestamp={Timestamp})",
-            method, path, timestamp);
+        // --- Nonce replay check (only after signature is confirmed valid) ---
+        IDatabase db = _redis.GetDatabase();
+        string redisKey = $"nonce:finance:{nonce}";
+
+        bool nonceIsNew = await db.StringSetAsync(
+            redisKey,
+            "1",
+            NonceTtl,
+            When.NotExists);
+
+        if (!nonceIsNew)
+        {
+            _logger.LogWarning(
+                "[HMAC] Rejeu detecte: nonce deja utilise ({Nonce}) pour {Method} {Path}",
+                nonce, method, path);
+
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsync("Nonce deja utilise (rejeu detecte).");
+            return;
+        }
+
+        _logger.LogInformation(
+            "[HMAC] Signature valide, nonce accepte pour {Method} {Path} (timestamp={Timestamp}, nonce={Nonce})",
+            method, path, timestamp, nonce);
 
         await _next(context);
     }
 
-    private static string BuildCanonicalString(string method, string path, string timestamp, byte[] body)
+    private static string BuildCanonicalString(string method, string path, string timestamp, string nonce, byte[] body)
     {
         string bodyHash = Sha256Hex(body);
-        return $"{method}\n{path}\n{timestamp}\n{bodyHash}";
+        return $"{method}\n{path}\n{timestamp}\n{nonce}\n{bodyHash}";
     }
 
     private static string ComputeHmac(string canonicalString, string secret)
@@ -110,16 +144,13 @@ public class HmacVerificationMiddleware
 
     private static bool IsValidSignature(string provided, string expected)
     {
-        if (string.IsNullOrEmpty(provided) || string.IsNullOrEmpty(expected))
-        {
-            return false;
-        }
+        if (string.IsNullOrEmpty(provided) || string.IsNullOrEmpty(expected)) return false;
+
         byte[] a = Encoding.UTF8.GetBytes(provided);
         byte[] b = Encoding.UTF8.GetBytes(expected);
-        if (a.Length != b.Length)
-        {
-            return false;
-        }
+
+        if (a.Length != b.Length) return false;
+
         return CryptographicOperations.FixedTimeEquals(a, b);
     }
 
@@ -127,10 +158,7 @@ public class HmacVerificationMiddleware
     {
         byte[] hash = SHA256.HashData(body ?? Array.Empty<byte>());
         var sb = new StringBuilder();
-        foreach (byte b in hash)
-        {
-            sb.Append(b.ToString("x2"));
-        }
+        foreach (byte b in hash) sb.Append(b.ToString("x2"));
         return sb.ToString();
     }
 }

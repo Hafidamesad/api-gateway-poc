@@ -169,7 +169,7 @@ management:
     web:
       exposure:
         include: health,gateway
-   endpoint:
+  endpoint:
     gateway:
       access: read-only
 

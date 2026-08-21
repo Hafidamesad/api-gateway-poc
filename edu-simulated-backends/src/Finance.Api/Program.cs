@@ -1,4 +1,4 @@
-
+using StackExchange.Redis;
 using Microsoft.EntityFrameworkCore;
 using Bogus;
 using Finance.Api.Data;
@@ -39,6 +39,14 @@ builder.WebHost.ConfigureKestrel(options =>
     {
         listenOptions.UseHttps();
     });
+});
+builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+{
+    var config = builder.Configuration["REDIS_CONNECTION"]
+        ?? Environment.GetEnvironmentVariable("REDIS_CONNECTION")
+        ?? "localhost:6379";
+
+    return ConnectionMultiplexer.Connect(config);
 });
 // --- Services ---
 builder.Services.AddControllers();

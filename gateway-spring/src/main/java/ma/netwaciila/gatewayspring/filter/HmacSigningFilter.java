@@ -16,84 +16,136 @@ import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.UUID;
 
 /**
  * Filtre global cote Gateway : signe chaque requete avant transfert mTLS vers le backend.
  *
- * NOTE naming: correspond a "HmacSignatureVerifier"/filtre HMAC prevu dans le plan initial.
- * Renomme HmacSigningFilter ici car ce filtre SIGNE (cote Gateway) ; la VERIFICATION
- * (recalcul + comparaison) se fait cote backend .NET, dans un middleware separe.
+ * La signature HMAC protege la chaine canonique suivante :
+ *
+ * METHOD
+ * PATH
+ * TIMESTAMP
+ * NONCE
+ * SHA256(BODY)
+ *
+ * Le nonce est inclus dans la signature afin qu'il ne puisse pas etre
+ * modifie sans rendre la signature invalide.
  *
  * ORDRE CRITIQUE : ce filtre doit s'executer APRES les filtres de route
  * (SetPath / RewritePath / StripPrefix definis dans application-secure.yaml)
- * mais AVANT le forward reseau reel vers le backend (NettyRoutingFilter,
- * qui s'execute a Ordered.LOWEST_PRECEDENCE - 1, donc en tout dernier).
- *
- * Pourquoi : les routes /api/finance/health -> SetPath=/health,
- * /api/finance/** -> RewritePath=/api/finance/(...) -> /api/${segment},
- * /api/rhpaie/** -> StripPrefix=2, changent le path AVANT que la requete
- * n'atteigne le backend. Si on signe le path original (client) au lieu du
- * path reecrit, le backend recalculera un HMAC different et rejettera
- * TOUTES les requetes -- echec silencieux, aucune vraie faille de securite,
- * juste une chaine canonique qui ne correspond jamais des deux cotes.
- *
- * Valeur choisie : tres superieure aux filtres de route (ordre ~1,2,3...)
- * mais tres inferieure a LOWEST_PRECEDENCE-1 (forward reseau, ~Integer.MAX-1).
- *
- * RoutingLogFilter reste a LOWEST_PRECEDENCE (log apres reponse), pas de conflit.
+ * mais AVANT le forward reseau reel vers le backend.
  */
 @Component
 public class HmacSigningFilter implements GlobalFilter, Ordered {
 
-    private static final Logger log = LoggerFactory.getLogger(HmacSigningFilter.class);
+    private static final Logger log =
+            LoggerFactory.getLogger(HmacSigningFilter.class);
 
-    // TODO phase secret management: remplacer par Vault. Pour l'instant: variable d'environnement.
+    // TODO phase secret management: remplacer par Vault.
+    // Pour l'instant: variable d'environnement/configuration.
     @Value("${security.hmac.secret:CHANGE_ME_DEV_SECRET}")
     private String hmacSecret;
 
     @Override
-    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+    public Mono<Void> filter(
+            ServerWebExchange exchange,
+            GatewayFilterChain chain) {
+
         ServerHttpRequest request = exchange.getRequest();
 
         return DataBufferUtils.join(request.getBody())
-                .defaultIfEmpty(exchange.getResponse().bufferFactory().wrap(new byte[0]))
+                .defaultIfEmpty(
+                        exchange.getResponse()
+                                .bufferFactory()
+                                .wrap(new byte[0])
+                )
                 .flatMap(dataBuffer -> {
-                    byte[] bodyBytes = new byte[dataBuffer.readableByteCount()];
+
+                    byte[] bodyBytes =
+                            new byte[dataBuffer.readableByteCount()];
+
                     dataBuffer.read(bodyBytes);
                     DataBufferUtils.release(dataBuffer);
 
-                    String timestamp = String.valueOf(Instant.now().toEpochMilli());
-                    String method = request.getMethod().name();
-                    String path = request.getURI().getRawPath();
+                    // 1. Informations de la requete
+                    String timestamp =
+                            String.valueOf(Instant.now().toEpochMilli());
 
-                    String canonicalString = HmacSignatureVerifier.buildCanonicalString(
-                            method, path, timestamp, bodyBytes);
-                    String signature = HmacSignatureVerifier.computeHmac(canonicalString, hmacSecret);
+                    String nonce =
+                            UUID.randomUUID().toString();
 
-                    log.info("[HMAC] {} {} -> timestamp={} signature={}",
-                            method, path, timestamp, signature);
+                    String method =
+                            request.getMethod().name();
 
-                    ServerHttpRequest mutatedRequest = new ServerHttpRequestDecorator(request) {
-                        @Override
-                        public Flux<DataBuffer> getBody() {
-                            // Re-injecte le corps (deja lu une fois pour le hash)
-                            DataBuffer buffer = exchange.getResponse()
-                                    .bufferFactory()
-                                    .wrap(bodyBytes);
-                            return Flux.just(buffer);
-                        }
-                    };
+                    String path =
+                            request.getURI().getRawPath();
 
-                    ServerHttpRequest requestWithHeaders = mutatedRequest.mutate()
-                            .header("X-Timestamp", timestamp)
-                            .header("X-Signature", signature)
-                            .build();
+                    // 2. Construire la chaine canonique
+                    // METHOD + PATH + TIMESTAMP + NONCE + SHA256(BODY)
+                    String canonicalString =
+                            HmacSignatureVerifier.buildCanonicalString(
+                                    method,
+                                    path,
+                                    timestamp,
+                                    nonce,
+                                    bodyBytes
+                            );
 
-                    ServerWebExchange mutatedExchange = exchange.mutate()
-                            .request(requestWithHeaders)
-                            .build();
+                    // 3. Calculer la signature HMAC
+                    String signature =
+                            HmacSignatureVerifier.computeHmac(
+                                    canonicalString,
+                                    hmacSecret
+                            );
+
+                    log.info(
+                            "[HMAC] {} {} -> timestamp={} nonce={} signature={}",
+                            method,
+                            path,
+                            timestamp,
+                            nonce,
+                            signature
+                    );
+
+                    // 4. Re-injecter le body car il a deja ete lu
+                    ServerHttpRequest mutatedRequest =
+                            new ServerHttpRequestDecorator(request) {
+
+                                @Override
+                                public Flux<DataBuffer> getBody() {
+
+                                    DataBuffer buffer =
+                                            exchange.getResponse()
+                                                    .bufferFactory()
+                                                    .wrap(bodyBytes);
+
+                                    return Flux.just(buffer);
+                                }
+                            };
+
+                    // 5. Ajouter les headers de securite
+                    ServerHttpRequest requestWithHeaders =
+                            mutatedRequest.mutate()
+                                    .header(
+                                            "X-Timestamp",
+                                            timestamp
+                                    )
+                                    .header(
+                                            "X-Nonce",
+                                            nonce
+                                    )
+                                    .header(
+                                            "X-Signature",
+                                            signature
+                                    )
+                                    .build();
+
+                    ServerWebExchange mutatedExchange =
+                            exchange.mutate()
+                                    .request(requestWithHeaders)
+                                    .build();
 
                     return chain.filter(mutatedExchange);
                 });
@@ -101,8 +153,7 @@ public class HmacSigningFilter implements GlobalFilter, Ordered {
 
     @Override
     public int getOrder() {
-        // Doit s'executer apres SetPath/RewritePath/StripPrefix (ordre bas)
-        // et avant le forward reseau reel (LOWEST_PRECEDENCE - 1, tres eleve).
+        // Apres les filtres de route et avant le forward reseau.
         return 10_000;
     }
 }
