@@ -4,8 +4,10 @@ using Bogus;
 using RhPaie.Api.Data;
 using RhPaie.Api.Models;
 using RhPaie.Api.Services;
+using RhPaie.Api.Security;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -48,6 +50,22 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddHealthChecks();
 
+// ============================================================
+// Redis
+// ============================================================
+
+builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+{
+    var config = builder.Configuration["REDIS_CONNECTION"]
+        ?? Environment.GetEnvironmentVariable("REDIS_CONNECTION")
+        ?? "localhost:6379";
+
+    var options = ConfigurationOptions.Parse(config);
+    options.AbortOnConnectFail = false;
+
+    return ConnectionMultiplexer.Connect(options);
+});
+
 var app = builder.Build();
 
 // --- Migration automatique + seed au démarrage ---
@@ -73,42 +91,12 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-// --- Middleware sécurité (palier élevé) ---
-// SoapCore ne permet pas d'inspecter les headers custom depuis l'implémentation du service,
-// donc la vérification de présence des headers HMAC se fait ici, avant que la requête
-// n'atteigne le endpoint SOAP. Même contrat placeholder que Finance (à valider).
-app.Use(async (HttpContext context, Func<Task> next) =>
-{
-    if (context.Request.Path.StartsWithSegments("/RhPaieService.asmx"))
-    {
-        var headersRequis = new[] { "X-HMAC-Signature", "X-Timestamp", "X-Nonce" };
-        var manquants = headersRequis.Where(h => !context.Request.Headers.ContainsKey(h)).ToList();
-
-        // Le WSDL (requête GET avec ?wsdl) reste accessible sans headers pour permettre
-        // la découverte du contrat de service par les clients/outils.
-        var estRequeteWsdl = context.Request.Query.ContainsKey("wsdl");
-
-        if (manquants.Any() && !estRequeteWsdl)
-        {
-            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            context.Response.ContentType = "application/json";
-            await context.Response.WriteAsJsonAsync(new
-            {
-                error = $"Headers de sécurité manquants : {string.Join(", ", manquants)}",
-                code = "MISSING_SECURITY_HEADERS",
-                timestamp = DateTime.UtcNow
-            });
-            return;
-        }
-    }
-
-    await next();
-});
+// --- Middleware sécurité : vérification HMAC réelle (signature + fraîcheur + anti-rejeu) ---
+app.UseMiddleware<HmacVerificationMiddleware>();
 
 app.UseRouting();
 
 // --- Endpoint SOAP ---
-// Le WSDL est généré automatiquement, accessible à /RhPaieService.asmx?wsdl
 app.UseSoapEndpoint<IRhPaieService>("/RhPaieService.asmx", new SoapEncoderOptions());
 
 app.MapHealthChecks("/health");

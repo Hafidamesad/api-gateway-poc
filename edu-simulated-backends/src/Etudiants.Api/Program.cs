@@ -4,13 +4,16 @@ using Etudiants.Api.Data;
 using Etudiants.Api.Models;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.ConfigureHttpsDefaults(https =>
     {
-
         https.ServerCertificate = new X509Certificate2("certs/service.p12", "changeit");
         https.ClientCertificateMode = ClientCertificateMode.RequireCertificate;
         https.ClientCertificateValidation = (clientCert, chain, sslPolicyErrors) =>
@@ -36,10 +39,11 @@ builder.WebHost.ConfigureKestrel(options =>
         };
     });
     options.ListenAnyIP(5101, listenOptions =>
-{
-    listenOptions.UseHttps();
+    {
+        listenOptions.UseHttps();
+    });
 });
-});
+
 // --- Services ---
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -49,6 +53,32 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 builder.Services.AddHealthChecks();
+
+// ============================================================
+// JWT Authentication
+// ============================================================
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        var jwtSecret =
+            Environment.GetEnvironmentVariable("JWT_SECRET")
+            ?? builder.Configuration["Security:Jwt:Secret"]
+            ?? "CHANGE_ME_DEV_JWT_SECRET_MIN_32_CHARS";
+
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret)),
+            ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 },
+            ValidateIssuer = false,
+            ValidateAudience = false,
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.Zero
+        };
+    });
+
+builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
@@ -81,10 +111,8 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-
+app.UseAuthentication();
 app.UseAuthorization();
-
-app.MapControllers();
+app.MapControllers().RequireAuthorization();
 app.MapHealthChecks("/health");
-
 app.Run();

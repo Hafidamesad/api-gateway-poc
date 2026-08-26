@@ -4,6 +4,9 @@ using Academique.Api.Data;
 using Academique.Api.Models;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -41,11 +44,35 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")));
-
 builder.Services.AddHealthChecks();
+
+// ============================================================
+// JWT Authentication
+// ============================================================
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        var jwtSecret =
+            Environment.GetEnvironmentVariable("JWT_SECRET")
+            ?? builder.Configuration["Security:Jwt:Secret"]
+            ?? "CHANGE_ME_DEV_JWT_SECRET_MIN_32_CHARS";
+
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret)),
+            ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 },
+            ValidateIssuer = false,
+            ValidateAudience = false,
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.Zero
+        };
+    });
+
+builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
@@ -54,27 +81,22 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.Migrate();
-
     if (!db.Notes.Any())
     {
         var matieres = new[] { "Algorithmique", "Bases de données", "Réseaux", "Systèmes d'exploitation", "Génie Logiciel" };
         var jours = new[] { "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi" };
         var creneaux = new[] { "08:30-10:30", "10:45-12:45", "14:00-16:00", "16:15-18:15" };
-
-        // On simule 50 étudiants (EtudiantId 1 à 50), avec quelques notes et créneaux chacun
         var noteFaker = new Faker<Note>("fr")
             .RuleFor(n => n.EtudiantId, f => f.Random.Int(1, 50))
             .RuleFor(n => n.Matiere, f => f.PickRandom(matieres))
             .RuleFor(n => n.Valeur, f => Math.Round(f.Random.Double(8, 20), 2))
             .RuleFor(n => n.Semestre, f => f.PickRandom("S1", "S2", "S3", "S4"));
-
         var edtFaker = new Faker<EmploiDuTemps>("fr")
             .RuleFor(e => e.EtudiantId, f => f.Random.Int(1, 50))
             .RuleFor(e => e.Jour, f => f.PickRandom(jours))
             .RuleFor(e => e.Creneau, f => f.PickRandom(creneaux))
             .RuleFor(e => e.Matiere, f => f.PickRandom(matieres))
             .RuleFor(e => e.Salle, f => $"Salle {f.Random.Int(100, 400)}");
-
         db.Notes.AddRange(noteFaker.Generate(300));
         db.EmploisDuTemps.AddRange(edtFaker.Generate(200));
         db.SaveChanges();
@@ -88,10 +110,8 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-
+app.UseAuthentication();
 app.UseAuthorization();
-
-app.MapControllers();
+app.MapControllers().RequireAuthorization();
 app.MapHealthChecks("/health");
-
 app.Run();
