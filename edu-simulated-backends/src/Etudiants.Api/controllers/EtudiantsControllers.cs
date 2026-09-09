@@ -2,11 +2,13 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Etudiants.Api.Data;
 using Etudiants.Api.Models;
+using Microsoft.AspNetCore.Authorization;
 
 namespace Etudiants.Api.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize(Roles = "ETUDIANT,ADMIN")]
 public class EtudiantsController : ControllerBase
 {
     private readonly AppDbContext _context;

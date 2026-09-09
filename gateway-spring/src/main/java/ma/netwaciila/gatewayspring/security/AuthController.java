@@ -31,7 +31,10 @@ public class AuthController {
         FAKE_USERS.put("admin", new String[]{"admin123", "ADMIN"});
         FAKE_USERS.put("etudiant", new String[]{"etudiant123", "ETUDIANT"});
         FAKE_USERS.put("finance", new String[]{"finance123", "FINANCE"});
-    }
+        FAKE_USERS.put("rh", new String[]{"rh123", "RH"});  
+        FAKE_USERS.put("transport", new String[]{"transport123", "TRANSPORT"});
+        FAKE_USERS.put("academique", new String[]{"academique123", "ACADEMIQUE"});
+}
 
     public AuthController(JwtUtil jwtUtil) {
         this.jwtUtil = jwtUtil;

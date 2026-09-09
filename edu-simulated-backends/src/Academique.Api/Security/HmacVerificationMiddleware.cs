@@ -1,27 +1,22 @@
 using System.Security.Cryptography;
 using System.Text;
 using StackExchange.Redis;
-using Microsoft.IdentityModel.Tokens;
-using System.IdentityModel.Tokens.Jwt;
 
-namespace RhPaie.Api.Security;
+namespace Academique.Api.Security;
 
 public class HmacVerificationMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly ILogger<HmacVerificationMiddleware> _logger;
     private readonly string _hmacSecret;
-    private readonly string _jwtSecret;
     private readonly IConnectionMultiplexer _redis;
 
     private const string TimestampHeader = "X-Timestamp";
     private const string NonceHeader = "X-Nonce";
     private const string SignatureHeader = "X-Signature";
-    private const string AuthHeader = "Authorization";
-    private const string BearerPrefix = "Bearer ";
 
     private static readonly TimeSpan TimestampFreshnessWindow = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan NonceTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan NonceTtl = TimeSpan.FromMinutes(5); // match freshness window
 
     public HmacVerificationMiddleware(
         RequestDelegate next,
@@ -37,60 +32,20 @@ public class HmacVerificationMiddleware
             ?? Environment.GetEnvironmentVariable("HMAC_SECRET")
             ?? throw new InvalidOperationException(
                 "HMAC_SECRET is not set. Export HMAC_SECRET before starting this service (see .env.example at repo root).");
-
-        _jwtSecret = configuration["JWT_SECRET"]
-            ?? Environment.GetEnvironmentVariable("JWT_SECRET")
-            ?? throw new InvalidOperationException(
-                "JWT_SECRET is not set. Export JWT_SECRET before starting this service (see .env.example at repo root).");
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
-        if (!context.Request.Path.StartsWithSegments("/RhPaieService.asmx"))
-        {
-            await _next(context);
-            return;
-        }
-
-        if (context.Request.Query.ContainsKey("wsdl"))
-        {
-            await _next(context);
-            return;
-        }
-
-        // --- JWT (vérifié en premier, avant tout traitement HMAC/body) ---
-        string? authHeader = context.Request.Headers[AuthHeader].ToString();
-
-        if (string.IsNullOrEmpty(authHeader) || !authHeader.StartsWith(BearerPrefix))
-        {
-            await RejectAsync(context, "Token JWT manquant.");
-            return;
-        }
-
-        string token = authHeader.Substring(BearerPrefix.Length);
-
-        if (!TryValidateJwt(token, out var principal))
-        {
-            _logger.LogWarning("[JWT] Token invalide ou expiré pour {Path}", context.Request.Path);
-            await RejectAsync(context, "Token JWT invalide ou expiré.");
-            return;
-        }
-        // --- RBAC : verification du role ---
-        var role = principal?.FindFirst("role")?.Value;
-        if (role != "RH" && role != "ADMIN")
-        {
-            _logger.LogWarning("[RBAC] Role '{Role}' non autorise pour {Path}", role, context.Request.Path);
-            context.Response.StatusCode = StatusCodes.Status403Forbidden;
-            context.Response.ContentType = "application/json";
-            await context.Response.WriteAsJsonAsync(new { error = "Role non autorise pour ce service." });
-            return;
-        }
-        // --- Headers HMAC ---
         if (!context.Request.Headers.TryGetValue(TimestampHeader, out var timestampValues) ||
             !context.Request.Headers.TryGetValue(NonceHeader, out var nonceValues) ||
             !context.Request.Headers.TryGetValue(SignatureHeader, out var signatureValues))
         {
-            await RejectAsync(context, "Headers de sécurité manquants : X-Signature, X-Timestamp, X-Nonce requis.");
+            _logger.LogWarning(
+                "[HMAC] Requete rejetee: en-tetes manquants pour {Method} {Path}",
+                context.Request.Method, context.Request.Path);
+
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsync("Signature HMAC ou nonce manquant.");
             return;
         }
 
@@ -98,10 +53,11 @@ public class HmacVerificationMiddleware
         string nonce = nonceValues.ToString();
         string providedSignature = signatureValues.ToString();
 
-        // --- Fraîcheur du timestamp ---
+        // --- Timestamp freshness check ---
         if (!long.TryParse(timestamp, out long timestampMs))
         {
-            await RejectAsync(context, "Timestamp invalide.");
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsync("Timestamp invalide.");
             return;
         }
 
@@ -111,14 +67,14 @@ public class HmacVerificationMiddleware
         if (age > TimestampFreshnessWindow || age < -TimestampFreshnessWindow)
         {
             _logger.LogWarning(
-                "[HMAC] Requête rejetée : timestamp hors fenêtre ({Age}) pour {Method} {Path}",
+                "[HMAC] Requete rejetee: timestamp hors fenetre ({Age}) pour {Method} {Path}",
                 age, context.Request.Method, context.Request.Path);
 
-            await RejectAsync(context, "Timestamp expiré ou invalide.");
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsync("Timestamp expire ou invalide.");
             return;
         }
 
-        // --- Lecture du corps ---
         context.Request.EnableBuffering();
 
         byte[] bodyBytes;
@@ -141,71 +97,37 @@ public class HmacVerificationMiddleware
                 "[HMAC] Signature invalide pour {Method} {Path} (timestamp={Timestamp}, nonce={Nonce})",
                 method, path, timestamp, nonce);
 
-            await RejectAsync(context, "Signature HMAC invalide.");
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsync("Signature HMAC invalide.");
             return;
         }
 
-        // --- Anti-rejeu par nonce ---
+        // --- Nonce replay check (only after signature is confirmed valid) ---
         IDatabase db = _redis.GetDatabase();
-        string redisKey = $"nonce:rhpaie:{nonce}";
+        string redisKey = $"nonce:academique:{nonce}";
 
-        bool nonceIsNew = await db.StringSetAsync(redisKey, "1", NonceTtl, When.NotExists);
+        bool nonceIsNew = await db.StringSetAsync(
+            redisKey,
+            "1",
+            NonceTtl,
+            When.NotExists);
 
         if (!nonceIsNew)
         {
             _logger.LogWarning(
-                "[HMAC] Rejeu détecté : nonce déjà utilisé ({Nonce}) pour {Method} {Path}",
+                "[HMAC] Rejeu detecte: nonce deja utilise ({Nonce}) pour {Method} {Path}",
                 nonce, method, path);
 
-            await RejectAsync(context, "Nonce déjà utilisé (rejeu détecté).");
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsync("Nonce deja utilise (rejeu detecte).");
             return;
         }
 
         _logger.LogInformation(
-            "[HMAC] Signature valide, nonce accepté pour {Method} {Path} (timestamp={Timestamp}, nonce={Nonce})",
+            "[HMAC] Signature valide, nonce accepte pour {Method} {Path} (timestamp={Timestamp}, nonce={Nonce})",
             method, path, timestamp, nonce);
 
         await _next(context);
-    }
-
-    private bool TryValidateJwt(string token, out System.Security.Claims.ClaimsPrincipal? principal)
-    {
-        principal = null;
-        var handler = new JwtSecurityTokenHandler();
-        handler.InboundClaimTypeMap.Clear();
-
-        var validationParameters = new TokenValidationParameters
-        {
-            ValidateIssuerSigningKey = true,
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtSecret)),
-            ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 },
-            ValidateIssuer = false,
-            ValidateAudience = false,
-            ValidateLifetime = true,
-            ClockSkew = TimeSpan.Zero
-        };
-
-        try
-        {
-            principal = handler.ValidateToken(token, validationParameters, out _);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static async Task RejectAsync(HttpContext context, string message)
-    {
-        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-        context.Response.ContentType = "application/json";
-        await context.Response.WriteAsJsonAsync(new
-        {
-            error = message,
-            code = "SECURITY_VERIFICATION_FAILED",
-            timestamp = DateTime.UtcNow
-        });
     }
 
     private static string BuildCanonicalString(string method, string path, string timestamp, string nonce, byte[] body)

@@ -40,9 +40,14 @@ public class JwtAuthenticationFilter implements WebFilter, Ordered {
 
     // Chemins publics, exemptes de JWT (login, health checks actuator)
     private static final String[] PUBLIC_PATHS = {
-            "/auth/login",
-            "/actuator/health"
-    };
+        "/auth/login",
+        "/actuator/health",
+        "/api/finance/health",
+        "/api/etudiants/health",
+        "/api/transport/health",
+        "/api/academique/health",
+        "/api/rhpaie/health"
+};
 
     private final JwtUtil jwtUtil;
 

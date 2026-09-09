@@ -2,10 +2,12 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Transport.Api.Data;
 using Transport.Api.Models;
+using Microsoft.AspNetCore.Authorization;
 
 namespace Transport.Api.Controllers;
 
 [ApiController]
+[Authorize(Roles = "TRANSPORT,ADMIN")]
 [Route("api/[controller]")]
 public class TransportController : ControllerBase
 {

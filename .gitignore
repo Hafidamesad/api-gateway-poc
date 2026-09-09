@@ -14,3 +14,12 @@ obj/
 *.db
 test.csr
 gateway-full.pem
+.env
+*.jtl
+jmeter.log
+elapsed-sorted.txt
+report-*users*/
+rhpaie.wsdl
+request.xml
+report-sla/
+*.csv

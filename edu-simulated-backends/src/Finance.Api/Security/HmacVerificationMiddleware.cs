@@ -30,7 +30,8 @@ public class HmacVerificationMiddleware
 
         _hmacSecret = configuration["HMAC_SECRET"]
             ?? Environment.GetEnvironmentVariable("HMAC_SECRET")
-            ?? "CHANGE_ME_DEV_SECRET";
+            ?? throw new InvalidOperationException(
+                "HMAC_SECRET is not set. Export HMAC_SECRET before starting this service (see .env.example at repo root).");
     }
 
     public async Task InvokeAsync(HttpContext context)

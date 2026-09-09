@@ -2,10 +2,12 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Academique.Api.Data;
 using Academique.Api.Models;
+using Microsoft.AspNetCore.Authorization;
 
 namespace Academique.Api.Controllers;
 
 [ApiController]
+[Authorize(Roles = "ACADEMIQUE,ADMIN")]
 [Route("api/[controller]")]
 public class AcademiqueController : ControllerBase
 {

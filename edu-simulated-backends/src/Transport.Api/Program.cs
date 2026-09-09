@@ -2,11 +2,13 @@ using Microsoft.EntityFrameworkCore;
 using Bogus;
 using Transport.Api.Data;
 using Transport.Api.Models;
+using Transport.Api.Security;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -40,6 +42,15 @@ builder.WebHost.ConfigureKestrel(options =>
     });
 });
 
+builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+{
+    var config = builder.Configuration["REDIS_CONNECTION"]
+        ?? Environment.GetEnvironmentVariable("REDIS_CONNECTION")
+        ?? "localhost:6379";
+
+    return ConnectionMultiplexer.Connect(config);
+});
+
 // --- Services ---
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -55,10 +66,13 @@ builder.Services.AddHealthChecks();
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
+        options.MapInboundClaims = false;
+
         var jwtSecret =
             Environment.GetEnvironmentVariable("JWT_SECRET")
             ?? builder.Configuration["Security:Jwt:Secret"]
-            ?? "CHANGE_ME_DEV_JWT_SECRET_MIN_32_CHARS";
+            ?? throw new InvalidOperationException(
+                "JWT_SECRET is not set. Export JWT_SECRET before starting this service (see .env.example at repo root).");
 
         options.TokenValidationParameters = new TokenValidationParameters
         {
@@ -68,7 +82,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateIssuer = false,
             ValidateAudience = false,
             ValidateLifetime = true,
-            ClockSkew = TimeSpan.Zero
+            ClockSkew = TimeSpan.Zero,
+            RoleClaimType = "role"
         };
     });
 
@@ -107,6 +122,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseMiddleware<HmacVerificationMiddleware>();
 app.MapControllers().RequireAuthorization();
 app.MapHealthChecks("/health");
 app.Run();

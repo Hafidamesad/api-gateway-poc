@@ -45,7 +45,7 @@ public class HmacSigningFilter implements GlobalFilter, Ordered {
 
     // TODO phase secret management: remplacer par Vault.
     // Pour l'instant: variable d'environnement/configuration.
-    @Value("${security.hmac.secret:CHANGE_ME_DEV_SECRET}")
+    @Value("${security.hmac.secret}")
     private String hmacSecret;
 
     @Override

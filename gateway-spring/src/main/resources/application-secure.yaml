@@ -83,8 +83,7 @@ spring:
               predicates:
                 - Path=/api/etudiants/**
               filters:
-                - RewritePath=/api/etudiants/(?<segment>.*), /api/${segment}
-
+                
                 - name: RequestRateLimiter
                   args:
                     redis-rate-limiter.replenishRate: 10
@@ -101,8 +100,7 @@ spring:
               predicates:
                 - Path=/api/transport/**
               filters:
-                - RewritePath=/api/transport/(?<segment>.*), /api/${segment}
-
+                
                 - name: RequestRateLimiter
                   args:
                     redis-rate-limiter.replenishRate: 10
@@ -119,8 +117,6 @@ spring:
               predicates:
                 - Path=/api/academique/**
               filters:
-                - RewritePath=/api/academique/(?<segment>.*), /api/${segment}
-
                 - name: RequestRateLimiter
                   args:
                     redis-rate-limiter.replenishRate: 10
@@ -137,8 +133,7 @@ spring:
               predicates:
                 - Path=/api/finance/**
               filters:
-                - RewritePath=/api/finance/(?<segment>.*), /api/${segment}
-
+    
                 - name: RequestRateLimiter
                   args:
                     redis-rate-limiter.replenishRate: 10
@@ -179,7 +174,13 @@ logging:
 
 security:
   hmac:
-    secret: ${HMAC_SECRET:CHANGE_ME_DEV_SECRET}
+    secret: ${HMAC_SECRET}
   jwt:
-    secret: ${JWT_SECRET:CHANGE_ME_DEV_JWT_SECRET_MIN_32_CHARS}
+    secret: ${JWT_SECRET}
     expiration-ms: 3600000
+  role-matrix:
+    "[/api/finance/**]": [FINANCE, ADMIN]
+    "[/api/etudiants/**]": [ETUDIANT, ADMIN]
+    "[/api/academique/**]": [ACADEMIQUE, ADMIN]
+    "[/api/transport/**]": [TRANSPORT, ADMIN]
+    "[/api/rhpaie/**]": [RH, ADMIN]

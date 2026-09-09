@@ -61,9 +61,18 @@ builder.Services.AddHealthChecks();
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
+        // Disable ASP.NET Core's default inbound claim remapping.
+        // Without this, the JWT's literal "role" claim gets silently
+        // rewritten to the long ClaimTypes.Role URI before RoleClaimType
+        // is ever consulted -- so setting RoleClaimType = "role" below
+        // would look for a claim that no longer exists, and every
+        // [Authorize(Roles=...)] check fails for every role, always.
+        options.MapInboundClaims = false;
+
         var jwtSecret = Environment.GetEnvironmentVariable("JWT_SECRET")
             ?? builder.Configuration["Security:Jwt:Secret"]
-            ?? "CHANGE_ME_DEV_JWT_SECRET_MIN_32_CHARS";
+            ?? throw new InvalidOperationException(
+                "JWT_SECRET is not set. Export JWT_SECRET before starting this service (see .env.example at repo root).");
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuerSigningKey = true,
@@ -72,7 +81,10 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateIssuer = false,
             ValidateAudience = false,
             ValidateLifetime = true,
-            ClockSkew = TimeSpan.Zero
+            ClockSkew = TimeSpan.Zero,
+            // JwtUtil.java (Gateway) emits a bare "role" claim via .claim("role", role),
+            // not the ClaimTypes.Role URI ASP.NET Core expects by default.
+            RoleClaimType = "role"
         };
     });
 builder.Services.AddAuthorization();
@@ -114,7 +126,6 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
-
 
 app.UseAuthentication();
 app.UseAuthorization();

@@ -29,7 +29,7 @@ public class JwtUtil {
     private static final Logger log = LoggerFactory.getLogger(JwtUtil.class);
 
     // TODO phase secret management: migrer vers Vault. Env var pour l'instant.
-    @Value("${security.jwt.secret:CHANGE_ME_DEV_JWT_SECRET_MIN_32_CHARS}")
+    @Value("${security.jwt.secret}")
     private String jwtSecret;
 
     // Duree de validite du token: 1 heure (3600000 ms)

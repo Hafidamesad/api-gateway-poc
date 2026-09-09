@@ -11,6 +11,9 @@ import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManagerFactory;
 import java.security.KeyStore;
 
+import reactor.netty.resources.ConnectionProvider;
+import java.time.Duration;
+
 @Configuration
 public class GatewaySslConfig {
 
@@ -58,9 +61,16 @@ var sslContext = SslContextBuilder.forClient()
         .trustManager(trustManagerFactory)
         .build();
 
-return HttpClient.create()
+ConnectionProvider provider = ConnectionProvider.builder("gateway-backend-pool")
+        .maxConnections(100)
+        .pendingAcquireTimeout(Duration.ofSeconds(15))
+        .maxIdleTime(Duration.ofSeconds(30))
+        .build();
+
+return HttpClient.create(provider)
         .secure(sslSpec -> sslSpec
                 .sslContext(sslContext)
+                .handshakeTimeout(Duration.ofSeconds(30))
                 .handlerConfigurator(sslHandler ->
                         sslHandler.engine().setSSLParameters(disableHostnameVerification(
                                 sslHandler.engine().getSSLParameters()))));
